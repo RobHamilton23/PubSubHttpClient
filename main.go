@@ -1,66 +1,47 @@
 package main
 
 import (
-	"context"
 	"fmt"
-	"log"
-	"time"
-
-	"cloud.google.com/go/pubsub"
+	"log/slog"
+	"monoraillime/pubsubReceiver/internal/pubsub"
 )
 
 func main() {
-	ctx := context.Background()
-	ctx, _ = context.WithTimeout(ctx, time.Second*10)
 	projectId := "rhamilton-001"
 
-	client, err := pubsub.NewClient(ctx, projectId)
+	pubsubClient, err := pubsub.NewPubSubHttpClient()
 	if err != nil {
-		log.Fatalf("Unable to create new client: %v", err)
+		slog.With("error", err).Error("Unable to create pubsub client")
+		panic(err)
 	}
-	defer client.Close()
 
-	subscriptions := client.Subscriptions(ctx)
-	for s, _ := subscriptions.Next(); s != nil; s, _ = subscriptions.Next() {
-		if s.ID() != "sub1112" {
-			continue
+	messages, err := pubsubClient.FetchMessages(projectId, "sub1112", 20)
+	if err != nil {
+		slog.With("error", err).Error("Unable to fetch messages")
+		panic(err)
+	}
+
+	ackIdsToDelay := []string{}
+
+	for _, m := range messages.ReceivedMessages {
+		decodedMessage, _ := m.Data()
+		ackIdsToDelay = append(ackIdsToDelay, m.AckId)
+		fmt.Printf("%v\t%s\n", m.DeliveryAttempt, decodedMessage)
+	}
+
+	if len(messages.ReceivedMessages) > 0 {
+		err = pubsubClient.ModifyAckDeadline(projectId, "sub1112", ackIdsToDelay, 60)
+		if err != nil {
+			slog.With("error", err).Error("Unable to modify ack deadline")
+			panic(err)
 		}
+	}
 
-		fmt.Println(s.ID())
-
-		dctx, _ := context.WithDeadline(ctx, time.Now().Add(time.Second*10))
-		log.Print("Starting receive")
-		messagesToAck := []*pubsub.Message{}
-
-		someChannel := make(chan *pubsub.Message)
-		go func() {
-			messageCollector := []*pubsub.Message{}
-			for len(messageCollector) < 5 && dctx.Err() != context.Canceled {
-				m := <-someChannel
-				fmt.Printf("Acking %s\n", m.ID)
-				messageCollector = append(messageCollector, m)
-			}
-
-			for _, m := range messageCollector {
-				fmt.Printf("Acked %s\n", m.ID)
-				m.Ack()
-			}
-		}()
-
-		s.Receive(dctx, func(ctx context.Context, m *pubsub.Message) {
-			fmt.Println(string(m.Data))
-			m.Ack()
-		})
-
-		for _, m := range messagesToAck {
-			fmt.Printf("We will ack %s shortly\n", m.Data)
+	if len(messages.ReceivedMessages) > 0 {
+		err = pubsubClient.AcknowledgeMessages(projectId, "sub1112", ackIdsToDelay)
+		if err != nil {
+			slog.With("error", err).Error("Unable to acknowledge messages")
+			panic(err)
 		}
-
-		for _, m := range messagesToAck {
-			fmt.Printf("Acking %s\n", m.Data)
-			m.Ack()
-		}
-
-		log.Print("Receive complete")
 	}
 }
